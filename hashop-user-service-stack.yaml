@@ -1,0 +1,1216 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: HaShop User Service Test Stack - Single EC2 + RDS + Cognito + Lambda
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: hashop
+
+  EnvironmentName:
+    Type: String
+    Default: test
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 Key Pair name for SSH
+
+  AllowedSSHIp:
+    Type: String
+    Default: 0.0.0.0/0
+    Description: CIDR allowed to SSH into EC2. For demo only, 0.0.0.0/0 is acceptable but not recommended long term.
+
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+
+  VpcCidr:
+    Type: String
+    Default: 10.20.0.0/16
+
+  AvailabilityZone1:
+    Type: String
+    Default: ap-southeast-1a
+    Description: First Availability Zone for public subnet and private subnet 1
+
+  AvailabilityZone2:
+    Type: String
+    Default: ap-southeast-1b
+    Description: Second Availability Zone for private subnet 2
+
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.20.1.0/24
+
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.20.11.0/24
+
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 10.20.12.0/24
+
+  DBName:
+    Type: String
+    Default: ecommerce_user_db
+
+  DBUsername:
+    Type: String
+    Default: admin
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    MinLength: 8
+    Description: RDS master password
+
+  DBInstanceClass:
+    Type: String
+    Default: db.t3.micro
+
+  DBAllocatedStorage:
+    Type: Number
+    Default: 20
+
+  UserServiceRepoUrl:
+    Type: String
+    Default: https://github.com/Leviethaidang/User-Service.git
+
+  FrontendRepoUrl:
+    Type: String
+    Default: https://github.com/Leviethaidang/Front-end.git
+
+  GitBranch:
+    Type: String
+    Default: main
+
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: S3 bucket containing Lambda function.zip
+
+  LambdaCodeS3Key:
+    Type: String
+    Default: lambda/user-post-confirmation/function.zip
+
+  ProductDBName:
+    Type: String
+    Default: ecommerce_product_db
+
+  ProductServiceRepoUrl:
+    Type: String
+    Default: https://github.com/Leviethaidang/Product-Service.git
+
+  CartDBName:
+    Type: String
+    Default: ecommerce_cart_db
+
+  CartServiceRepoUrl:
+    Type: String
+    Default: https://github.com/Leviethaidang/Cart-Service.git
+
+  InternalApiKey:
+    Type: String
+    NoEcho: true
+    Default: Letmein123!!!
+    Description: Internal API key shared between services for test environment
+  
+  PaymentDBName:
+    Type: String
+    Default: ecommerce_payment_db
+
+  OrderDBName:
+    Type: String
+    Default: ecommerce_order_db
+
+  PaymentServiceRepoUrl:
+    Type: String
+    Default: https://github.com/Leviethaidang/Payment-Service.git
+
+  OrderServiceRepoUrl:
+    Type: String
+    Default: https://github.com/Leviethaidang/Order-Service.git
+
+Resources:
+  HashopVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-vpc
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-igw
+
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref HashopVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref HashopVPC
+      CidrBlock: !Ref PublicSubnetCidr
+      AvailabilityZone: !Ref AvailabilityZone1
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-public-subnet
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref HashopVPC
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Ref AvailabilityZone1
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-private-subnet-1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref HashopVPC
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Ref AvailabilityZone2
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-private-subnet-2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref HashopVPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-public-rt
+
+  PublicDefaultRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HaShop EC2 SG
+      VpcId: !Ref HashopVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AllowedSSHIp
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-ec2-sg
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HaShop Lambda SG
+      VpcId: !Ref HashopVPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-lambda-sg
+
+  DatabaseSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: HaShop RDS SG
+      VpcId: !Ref HashopVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref EC2SecurityGroup
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-db-sg
+
+  UserDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: HaShop User DB subnet group
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-user-db-subnet-group
+
+  UserDB:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      Engine: mysql
+      DBName: !Ref DBName
+      DBInstanceClass: !Ref DBInstanceClass
+      AllocatedStorage: !Ref DBAllocatedStorage
+      StorageType: gp2
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      PubliclyAccessible: false
+      MultiAZ: false
+      BackupRetentionPeriod: 0
+      DeletionProtection: false
+      DBSubnetGroupName: !Ref UserDBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DatabaseSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-user-db
+
+  ProductImageBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      BucketName: !Sub ${ProjectName}-${EnvironmentName}-product-images-${AWS::AccountId}-${AWS::Region}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - "*"
+            AllowedMethods:
+              - GET
+              - PUT
+              - HEAD
+            AllowedHeaders:
+              - "*"
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3000
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-product-images
+
+  ProductCloudFrontOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub ${ProjectName}-${EnvironmentName}-product-images-oac
+        Description: OAC for HaShop product images bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  ProductImageDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub ${ProjectName}-${EnvironmentName} product image distribution
+        Origins:
+          - Id: ProductImageS3Origin
+            DomainName: !GetAtt ProductImageBucket.RegionalDomainName
+            OriginAccessControlId: !Ref ProductCloudFrontOAC
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+        DefaultCacheBehavior:
+          TargetOriginId: ProductImageS3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+            Cookies:
+              Forward: none
+        PriceClass: PriceClass_100
+
+  ProductImageBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ProductImageBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontReadProductImages
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action:
+              - s3:GetObject
+            Resource: !Sub ${ProductImageBucket.Arn}/*
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${ProductImageDistribution}
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvironmentName}-user-lambda-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+
+  PostConfirmationFunction:
+    Type: AWS::Lambda::Function
+    DependsOn: UserDB
+    Properties:
+      FunctionName: !Sub ${ProjectName}-${EnvironmentName}-user-post-confirmation
+      Runtime: nodejs20.x
+      Handler: index.handler
+      Timeout: 20
+      MemorySize: 128
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+      VpcConfig:
+        SecurityGroupIds:
+          - !Ref LambdaSecurityGroup
+        SubnetIds:
+          - !Ref PrivateSubnet1
+          - !Ref PrivateSubnet2
+      Environment:
+        Variables:
+          DB_HOST: !GetAtt UserDB.Endpoint.Address
+          DB_USER: !Ref DBUsername
+          DB_PASSWORD: !Ref DBPassword
+          DB_NAME: !Ref DBName
+
+  LambdaInvokePermissionForCognito:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref PostConfirmationFunction
+      Action: lambda:InvokeFunction
+      Principal: cognito-idp.amazonaws.com
+      SourceAccount: !Ref AWS::AccountId
+
+  UserPool:
+    Type: AWS::Cognito::UserPool
+    DependsOn:
+      - LambdaInvokePermissionForCognito
+      - PostConfirmationFunction
+    Properties:
+      UserPoolName: !Sub ${ProjectName}-${EnvironmentName}-user-pool
+      UsernameAttributes:
+        - email
+      UsernameConfiguration:
+        CaseSensitive: false
+      AutoVerifiedAttributes:
+        - email
+      MfaConfiguration: "OFF"
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 8
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireSymbols: false
+          RequireUppercase: true
+      Schema:
+        - Name: email
+          AttributeDataType: String
+          Required: true
+          Mutable: true
+        - Name: name
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+        - Name: phone_number
+          AttributeDataType: String
+          Required: false
+          Mutable: true
+      LambdaConfig:
+        PostConfirmation: !GetAtt PostConfirmationFunction.Arn
+      AccountRecoverySetting:
+        RecoveryMechanisms:
+          - Name: verified_email
+            Priority: 1
+
+  UserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      ClientName: !Sub ${ProjectName}-${EnvironmentName}-user-service-client
+      UserPoolId: !Ref UserPool
+      GenerateSecret: true
+      ExplicitAuthFlows:
+        - ALLOW_USER_AUTH
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_USER_SRP_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+      PreventUserExistenceErrors: ENABLED
+      SupportedIdentityProviders:
+        - COGNITO
+      EnableTokenRevocation: true
+
+  AdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Admin
+      UserPoolId: !Ref UserPool
+      Description: HaShop admin users
+      Precedence: 1
+
+  CustomerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: Customer
+      UserPoolId: !Ref UserPool
+      Description: HaShop customer users
+      Precedence: 2
+
+  PaymentRequestedTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-${EnvironmentName}-payment-requested-topic
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-payment-requested-topic
+
+  PaymentResultTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-${EnvironmentName}-payment-result-topic
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-payment-result-topic
+
+  PaymentRequestedQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-${EnvironmentName}-payment-requested-queue
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 345600
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-payment-requested-queue
+
+  PaymentResultQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-${EnvironmentName}-payment-result-queue
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 345600
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-payment-result-queue
+
+  PaymentRequestedQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref PaymentRequestedQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowPaymentRequestedTopicToSendMessage
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt PaymentRequestedQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref PaymentRequestedTopic
+
+  PaymentResultQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref PaymentResultQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowPaymentResultTopicToSendMessage
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action:
+              - sqs:SendMessage
+            Resource: !GetAtt PaymentResultQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref PaymentResultTopic
+
+  PaymentRequestedSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: PaymentRequestedQueuePolicy
+    Properties:
+      TopicArn: !Ref PaymentRequestedTopic
+      Protocol: sqs
+      Endpoint: !GetAtt PaymentRequestedQueue.Arn
+      RawMessageDelivery: true
+
+  PaymentResultSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: PaymentResultQueuePolicy
+    Properties:
+      TopicArn: !Ref PaymentResultTopic
+      Protocol: sqs
+      Endpoint: !GetAtt PaymentResultQueue.Arn
+      RawMessageDelivery: true
+
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-${EnvironmentName}-ec2-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-${EnvironmentName}-ec2-user-service-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - cognito-idp:SignUp
+                  - cognito-idp:ConfirmSignUp
+                  - cognito-idp:InitiateAuth
+                  - cognito-idp:AdminInitiateAuth
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminUpdateUserAttributes
+                  - cognito-idp:AdminDeleteUser
+                  - cognito-idp:AdminDisableUser
+                  - cognito-idp:AdminEnableUser
+                  - cognito-idp:AdminAddUserToGroup
+                  - cognito-idp:AdminRemoveUserFromGroup
+                  - cognito-idp:ListUsers
+                  - cognito-idp:ListUsersInGroup
+                  - cognito-idp:GlobalSignOut
+                Resource: !GetAtt UserPool.Arn
+                
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:DeleteObject
+                Resource: !Sub ${ProductImageBucket.Arn}/*
+
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt ProductImageBucket.Arn
+
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref PaymentRequestedTopic
+                  - !Ref PaymentResultTopic
+
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:ChangeMessageVisibility
+                  - sqs:GetQueueAttributes
+                  - sqs:GetQueueUrl
+                Resource:
+                  - !GetAtt PaymentRequestedQueue.Arn
+                  - !GetAtt PaymentResultQueue.Arn
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2InstanceRole
+
+  UserServiceEC2:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - UserDB
+      - UserPool
+      - UserPoolClient
+      - AdminGroup
+      - CustomerGroup
+      - ProductImageBucket
+      - ProductImageDistribution
+      - PaymentRequestedTopic
+      - PaymentResultTopic
+      - PaymentRequestedQueue
+      - PaymentResultQueue
+      - PaymentRequestedSubscription
+      - PaymentResultSubscription
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyName
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      SubnetId: !Ref PublicSubnet
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-user-service-ec2
+      UserData:
+        Fn::Base64:
+          Fn::Sub:
+            - |
+              #!/bin/bash -xe
+
+              exec > >(tee /var/log/hashop-userdata.log | logger -t hashop-userdata -s 2>/dev/console) 2>&1
+
+              dnf update -y
+              dnf install -y git nginx mariadb105
+
+              curl -fsSL https://rpm.nodesource.com/setup_20.x | bash -
+              dnf install -y nodejs
+
+              npm install -g pm2
+
+              systemctl enable nginx
+              systemctl start nginx
+
+              cd /home/ec2-user
+
+              git clone -b "${GitBranch}" "${UserServiceRepoUrl}" User-Service
+
+              chown -R ec2-user:ec2-user /home/ec2-user/User-Service
+
+              cat > /home/ec2-user/User-Service/.env <<'EOF_ENV'
+              PORT=3000
+              AWS_REGION=${AWS::Region}
+
+              DB_HOST=${DBEndpoint}
+              DB_USER=${DBUsername}
+              DB_PASSWORD=${DBPassword}
+              DB_NAME=${DBName}
+
+              COGNITO_USER_POOL_ID=${UserPoolId}
+              COGNITO_APP_CLIENT_ID=${UserPoolClientId}
+              COGNITO_CLIENT_ID=${UserPoolClientId}
+              COGNITO_CLIENT_SECRET=${UserPoolClientSecret}
+              EOF_ENV
+
+              chown ec2-user:ec2-user /home/ec2-user/User-Service/.env
+              chmod 600 /home/ec2-user/User-Service/.env
+
+              echo "Waiting for RDS..."
+              for n in $(seq 1 60); do
+                if mysqladmin ping -h "${DBEndpoint}" -u "${DBUsername}" -p"${DBPassword}" --silent; then
+                  echo "RDS is ready"
+                  break
+                fi
+
+                echo "RDS not ready yet. Retry $n..."
+                sleep 10
+              done
+
+              if [ -f "/home/ec2-user/User-Service/sql/init-user-db.sql" ]; then
+                mysql -h "${DBEndpoint}" -u "${DBUsername}" -p"${DBPassword}" < /home/ec2-user/User-Service/sql/init-user-db.sql
+              fi
+
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/User-Service && npm ci || npm install'
+
+              pm2 startup systemd -u ec2-user --hp /home/ec2-user || true
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/User-Service && pm2 delete user-service || true'
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/User-Service && pm2 start server.js --name user-service'
+              sudo -u ec2-user bash -lc 'pm2 save'
+
+              cd /home/ec2-user
+              git clone -b "${GitBranch}" "${ProductServiceRepoUrl}" Product-Service
+
+              chown -R ec2-user:ec2-user /home/ec2-user/Product-Service
+
+              cat > /home/ec2-user/Product-Service/.env <<'EOF_PRODUCT_ENV'
+              PORT=3001
+              AWS_REGION=${AWS::Region}
+
+              DB_HOST=${DBEndpoint}
+              DB_USER=${DBUsername}
+              DB_PASSWORD=${DBPassword}
+              DB_NAME=${ProductDBName}
+
+              COGNITO_USER_POOL_ID=${UserPoolId}
+              COGNITO_APP_CLIENT_ID=${UserPoolClientId}
+              COGNITO_CLIENT_ID=${UserPoolClientId}
+
+              S3_BUCKET_NAME=${ProductImageBucketName}
+              CLOUDFRONT_DOMAIN=${ProductCloudFrontDomain}
+              EOF_PRODUCT_ENV
+
+              chown ec2-user:ec2-user /home/ec2-user/Product-Service/.env
+              chmod 600 /home/ec2-user/Product-Service/.env
+
+              if [ -f "/home/ec2-user/Product-Service/sql/init-product-db.sql" ]; then
+                mysql -h "${DBEndpoint}" -u "${DBUsername}" -p"${DBPassword}" < /home/ec2-user/Product-Service/sql/init-product-db.sql
+              fi
+
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Product-Service && npm ci || npm install'
+
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Product-Service && pm2 delete product-service || true'
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Product-Service && pm2 start server.js --name product-service'
+              sudo -u ec2-user bash -lc 'pm2 save'
+
+              cd /home/ec2-user
+
+              git clone -b "${GitBranch}" "${CartServiceRepoUrl}" Cart-Service
+
+              chown -R ec2-user:ec2-user /home/ec2-user/Cart-Service
+
+              cat > /home/ec2-user/Cart-Service/.env <<'EOF_CART_ENV'
+              PORT=3002
+              AWS_REGION=${AWS::Region}
+
+              DB_HOST=${DBEndpoint}
+              DB_USER=${DBUsername}
+              DB_PASSWORD=${DBPassword}
+              DB_NAME=${CartDBName}
+
+              COGNITO_USER_POOL_ID=${UserPoolId}
+              COGNITO_APP_CLIENT_ID=${UserPoolClientId}
+              COGNITO_CLIENT_ID=${UserPoolClientId}
+
+              PRODUCT_SERVICE_URL=http://127.0.0.1:3001
+
+              INTERNAL_API_KEY=${InternalApiKey}
+              EOF_CART_ENV
+
+              chown ec2-user:ec2-user /home/ec2-user/Cart-Service/.env
+              chmod 600 /home/ec2-user/Cart-Service/.env
+
+              if [ -f "/home/ec2-user/Cart-Service/sql/init-cart-db.sql" ]; then
+                mysql -h "${DBEndpoint}" -u "${DBUsername}" -p"${DBPassword}" < /home/ec2-user/Cart-Service/sql/init-cart-db.sql
+              fi
+
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Cart-Service && npm ci || npm install'
+
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Cart-Service && pm2 delete cart-service || true'
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Cart-Service && pm2 start server.js --name cart-service'
+              sudo -u ec2-user bash -lc 'pm2 save'
+
+              cd /home/ec2-user
+              git clone -b "${GitBranch}" "${PaymentServiceRepoUrl}" Payment-Service
+
+              chown -R ec2-user:ec2-user /home/ec2-user/Payment-Service
+
+              cat > /home/ec2-user/Payment-Service/.env <<'EOF_PAYMENT_ENV'
+              PORT=3003
+              AWS_REGION=${AWS::Region}
+
+              DB_HOST=${DBEndpoint}
+              DB_USER=${DBUsername}
+              DB_PASSWORD=${DBPassword}
+              DB_NAME=${PaymentDBName}
+
+              COGNITO_USER_POOL_ID=${UserPoolId}
+              COGNITO_APP_CLIENT_ID=${UserPoolClientId}
+              COGNITO_CLIENT_ID=${UserPoolClientId}
+
+              PAYMENT_RESULT_TOPIC_ARN=${PaymentResultTopicArn}
+              PAYMENT_REQUESTED_QUEUE_URL=${PaymentRequestedQueueUrl}
+
+              INTERNAL_API_KEY=${InternalApiKey}
+              EOF_PAYMENT_ENV
+
+              chown ec2-user:ec2-user /home/ec2-user/Payment-Service/.env
+              chmod 600 /home/ec2-user/Payment-Service/.env
+
+              if [ -f "/home/ec2-user/Payment-Service/sql/init-payment-db.sql" ]; then
+                mysql -h "${DBEndpoint}" -u "${DBUsername}" -p"${DBPassword}" < /home/ec2-user/Payment-Service/sql/init-payment-db.sql
+              fi
+
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Payment-Service && npm ci || npm install'
+
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Payment-Service && pm2 delete payment-service || true'
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Payment-Service && pm2 start server.js --name payment-service'
+
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Payment-Service && pm2 delete payment-worker || true'
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Payment-Service && pm2 start worker.js --name payment-worker'
+
+              sudo -u ec2-user bash -lc 'pm2 save'
+
+              cd /home/ec2-user
+
+              git clone -b "${GitBranch}" "${OrderServiceRepoUrl}" Order-Service
+
+              chown -R ec2-user:ec2-user /home/ec2-user/Order-Service
+
+              cat > /home/ec2-user/Order-Service/.env <<'EOF_ORDER_ENV'
+              PORT=3004
+              AWS_REGION=${AWS::Region}
+
+              DB_HOST=${DBEndpoint}
+              DB_USER=${DBUsername}
+              DB_PASSWORD=${DBPassword}
+              DB_NAME=${OrderDBName}
+
+              COGNITO_USER_POOL_ID=${UserPoolId}
+              COGNITO_APP_CLIENT_ID=${UserPoolClientId}
+              COGNITO_CLIENT_ID=${UserPoolClientId}
+
+              USER_SERVICE_URL=http://127.0.0.1:3000
+              PRODUCT_SERVICE_URL=http://127.0.0.1:3001
+              CART_SERVICE_URL=http://127.0.0.1:3002
+              PAYMENT_SERVICE_URL=http://127.0.0.1:3003
+
+              PAYMENT_REQUESTED_TOPIC_ARN=${PaymentRequestedTopicArn}
+              PAYMENT_RESULT_QUEUE_URL=${PaymentResultQueueUrl}
+
+              INTERNAL_API_KEY=${InternalApiKey}
+              EOF_ORDER_ENV
+
+              chown ec2-user:ec2-user /home/ec2-user/Order-Service/.env
+              chmod 600 /home/ec2-user/Order-Service/.env
+
+              if [ -f "/home/ec2-user/Order-Service/sql/init-order-db.sql" ]; then
+                mysql -h "${DBEndpoint}" -u "${DBUsername}" -p"${DBPassword}" < /home/ec2-user/Order-Service/sql/init-order-db.sql
+              fi
+
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Order-Service && npm ci || npm install'
+
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Order-Service && pm2 delete order-service || true'
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Order-Service && pm2 start server.js --name order-service'
+
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Order-Service && pm2 delete order-worker || true'
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Order-Service && pm2 start worker.js --name order-worker'
+
+              sudo -u ec2-user bash -lc 'pm2 save'
+              
+              mkdir -p /var/www/hashop
+
+              git clone -b "${GitBranch}" "${FrontendRepoUrl}" Front-end
+              cp -r /home/ec2-user/Front-end/* /var/www/hashop/ || true
+
+              mkdir -p /var/www/hashop/assets/js
+
+              cat > /var/www/hashop/assets/js/config.js <<'EOF_CONFIG'
+              window.APP_CONFIG = {
+                  USER_SERVICE_URL: "",
+                  PRODUCT_SERVICE_URL: "",
+                  CART_SERVICE_URL: "",
+                  ORDER_SERVICE_URL: "",
+                  PAYMENT_SERVICE_URL: ""
+              };
+              EOF_CONFIG
+
+              chown -R nginx:nginx /var/www/hashop || true
+
+              rm -f /etc/nginx/conf.d/default.conf
+
+              cat > /etc/nginx/conf.d/hashop.conf <<'EOF_NGINX'
+              server {
+                  listen 80 default_server;
+                  server_name _;
+
+                  root /var/www/hashop;
+                  index index.html;
+
+                  client_max_body_size 20M;
+
+                  location = /index.html {
+                      return 302 /;
+                  }
+
+                  location = /login.html {
+                      return 302 /login;
+                  }
+
+                  location = /register.html {
+                      return 302 /register;
+                  }
+
+                  location = /profile.html {
+                      return 302 /profile;
+                  }
+
+                  location = /edit-profile.html {
+                      return 302 /profile/edit;
+                  }
+
+                  location = /admin-users.html {
+                      return 302 /admin/users;
+                  }
+
+                  location = /cart.html {
+                      return 302 /cart;
+                  }
+
+                  location = /confirm-order.html {
+                      return 302 /confirm-order/cart;
+                  }
+
+                  location = /orders.html {
+                      return 302 /orders;
+                  }
+
+                  location = /order-detail.html {
+                      return 302 /orders;
+                  }
+
+                  location = /admin-orders.html {
+                      return 302 /admin/orders;
+                  }
+                  
+                  location = / {
+                      try_files /index.html =404;
+                  }
+
+                  location = /login {
+                      try_files /login.html =404;
+                  }
+
+                  location = /register {
+                      try_files /register.html =404;
+                  }
+
+                  location = /profile {
+                      try_files /profile.html =404;
+                  }
+
+                  location = /profile/edit {
+                      try_files /edit-profile.html =404;
+                  }
+
+                  location = /admin/users {
+                      try_files /admin-users.html =404;
+                  }
+
+                  location ^~ /products/ {
+                      try_files /product-detail.html =404;
+                  }
+
+                  location = /admin/products {
+                      try_files /admin-products.html =404;
+                  }
+
+                  location = /admin/categories {
+                      try_files /admin-categories.html =404;
+                  }
+
+                  location = /cart {
+                      try_files /cart.html =404;
+                  }
+                  
+                  location = /confirm-order {
+                      try_files /confirm-order.html =404;
+                  }
+
+                  location = /confirm-order/cart {
+                      try_files /confirm-order.html =404;
+                  }
+
+                  location = /confirm-order/buy-now {
+                      try_files /confirm-order.html =404;
+                  }
+
+                  location = /orders {
+                      try_files /orders.html =404;
+                  }
+
+                  location ^~ /orders/ {
+                      try_files /order-detail.html =404;
+                  }
+
+                  location = /admin/orders {
+                      try_files /admin-orders.html =404;
+                  }
+
+                  location /api/users {
+                      proxy_pass http://127.0.0.1:3000;
+                      proxy_http_version 1.1;
+
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      proxy_set_header X-Forwarded-Proto $scheme;
+                      proxy_set_header Authorization $http_authorization;
+                  }
+
+                  location /api/products {
+                      proxy_pass http://127.0.0.1:3001;
+                      proxy_http_version 1.1;
+
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      proxy_set_header X-Forwarded-Proto $scheme;
+                      proxy_set_header Authorization $http_authorization;
+                  }
+
+                  location /api/categories {
+                      proxy_pass http://127.0.0.1:3001;
+                      proxy_http_version 1.1;
+
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      proxy_set_header X-Forwarded-Proto $scheme;
+                      proxy_set_header Authorization $http_authorization;
+                  }
+
+                  location /api/cart {
+                      proxy_pass http://127.0.0.1:3002;
+                      proxy_http_version 1.1;
+
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      proxy_set_header X-Forwarded-Proto $scheme;
+                      proxy_set_header Authorization $http_authorization;
+                      proxy_set_header X-Internal-Api-Key $http_x_internal_api_key;
+                  }
+
+                  location /api/payments {
+                      proxy_pass http://127.0.0.1:3003;
+                      proxy_http_version 1.1;
+
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      proxy_set_header X-Forwarded-Proto $scheme;
+                      proxy_set_header Authorization $http_authorization;
+                      proxy_set_header X-Internal-Api-Key $http_x_internal_api_key;
+                  }
+
+                  location /api/orders {
+                      proxy_pass http://127.0.0.1:3004;
+                      proxy_http_version 1.1;
+
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      proxy_set_header X-Forwarded-Proto $scheme;
+                      proxy_set_header Authorization $http_authorization;
+                      proxy_set_header X-Internal-Api-Key $http_x_internal_api_key;
+                  }
+
+                  location /api/ {
+                      return 404;
+                  }
+
+                  location / {
+                      try_files $uri $uri/ /index.html;
+                  }
+              }
+              EOF_NGINX
+
+              nginx -t
+              systemctl reload nginx
+
+              echo "HaShop User + Product + Cart + Payment + Order Service bootstrap completed"
+            - DBEndpoint: !GetAtt UserDB.Endpoint.Address
+              UserPoolId: !Ref UserPool
+              UserPoolClientId: !Ref UserPoolClient
+              UserPoolClientSecret: !GetAtt UserPoolClient.ClientSecret
+              ProductDBName: !Ref ProductDBName
+              ProductImageBucketName: !Ref ProductImageBucket
+              ProductCloudFrontDomain: !GetAtt ProductImageDistribution.DomainName
+              CartDBName: !Ref CartDBName
+              InternalApiKey: !Ref InternalApiKey
+              PaymentDBName: !Ref PaymentDBName
+              OrderDBName: !Ref OrderDBName
+              PaymentRequestedTopicArn: !Ref PaymentRequestedTopic
+              PaymentResultTopicArn: !Ref PaymentResultTopic
+              PaymentRequestedQueueUrl: !Ref PaymentRequestedQueue
+              PaymentResultQueueUrl: !Ref PaymentResultQueue
+
+Outputs:
+  WebsiteUrl:
+    Description: HaShop website URL
+    Value: !Sub http://${UserServiceEC2.PublicIp}
+
+  EC2PublicIp:
+    Description: EC2 public IP
+    Value: !GetAtt UserServiceEC2.PublicIp
+
+  UserPoolId:
+    Description: Cognito User Pool ID
+    Value: !Ref UserPool
+
+  UserPoolClientId:
+    Description: Cognito App Client ID
+    Value: !Ref UserPoolClient
+
+  RdsEndpoint:
+    Description: RDS endpoint
+    Value: !GetAtt UserDB.Endpoint.Address
+
+  LambdaFunctionName:
+    Description: Post confirmation Lambda function name
+    Value: !Ref PostConfirmationFunction
+  
+  ProductImageBucketName:
+    Description: S3 bucket for product images
+    Value: !Ref ProductImageBucket
+
+  ProductCloudFrontDomain:
+    Description: CloudFront domain for product images
+    Value: !GetAtt ProductImageDistribution.DomainName
+  
+  PaymentRequestedTopicArn:
+    Description: SNS topic ARN for payment requests
+    Value: !Ref PaymentRequestedTopic
+
+  PaymentResultTopicArn:
+    Description: SNS topic ARN for payment results
+    Value: !Ref PaymentResultTopic
+
+  PaymentRequestedQueueUrl:
+    Description: SQS queue URL for payment requests
+    Value: !Ref PaymentRequestedQueue
+
+  PaymentResultQueueUrl:
+    Description: SQS queue URL for payment results
+    Value: !Ref PaymentResultQueue
