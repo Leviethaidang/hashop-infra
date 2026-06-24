@@ -137,6 +137,14 @@ Parameters:
     Type: String
     Default: https://github.com/Leviethaidang/Order-Service.git
 
+  InventoryDBName:
+    Type: String
+    Default: ecommerce_inventory_db
+
+  InventoryServiceRepoUrl:
+    Type: String
+    Default: https://github.com/Leviethaidang/Inventory-Service.git
+
 Resources:
   HashopVPC:
     Type: AWS::EC2::VPC
@@ -788,6 +796,9 @@ Resources:
 
               S3_BUCKET_NAME=${ProductImageBucketName}
               CLOUDFRONT_DOMAIN=${ProductCloudFrontDomain}
+
+              INVENTORY_SERVICE_URL=http://127.0.0.1:3002
+              INTERNAL_API_KEY=${InternalApiKey}
               EOF_PRODUCT_ENV
 
               chown ec2-user:ec2-user /home/ec2-user/Product-Service/.env
@@ -805,12 +816,46 @@ Resources:
 
               cd /home/ec2-user
 
+              git clone -b "${GitBranch}" "${InventoryServiceRepoUrl}" Inventory-Service
+
+              chown -R ec2-user:ec2-user /home/ec2-user/Inventory-Service
+
+              cat > /home/ec2-user/Inventory-Service/.env <<'EOF_INVENTORY_ENV'
+              PORT=3002
+              AWS_REGION=${AWS::Region}
+
+              DB_HOST=${DBEndpoint}
+              DB_USER=${DBUsername}
+              DB_PASSWORD=${DBPassword}
+              DB_NAME=${InventoryDBName}
+
+              COGNITO_USER_POOL_ID=${UserPoolId}
+              COGNITO_APP_CLIENT_ID=${UserPoolClientId}
+              COGNITO_CLIENT_ID=${UserPoolClientId}
+
+              INTERNAL_API_KEY=${InternalApiKey}
+              EOF_INVENTORY_ENV
+
+              chown ec2-user:ec2-user /home/ec2-user/Inventory-Service/.env
+              chmod 600 /home/ec2-user/Inventory-Service/.env
+
+              if [ -f "/home/ec2-user/Inventory-Service/sql/init-inventory-db.sql" ]; then
+                mysql -h "${DBEndpoint}" -u "${DBUsername}" -p"${DBPassword}" < /home/ec2-user/Inventory-Service/sql/init-inventory-db.sql
+              fi
+
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Inventory-Service && npm ci || npm install'
+
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Inventory-Service && pm2 delete inventory-service || true'
+              sudo -u ec2-user bash -lc 'cd /home/ec2-user/Inventory-Service && pm2 start server.js --name inventory-service'
+              sudo -u ec2-user bash -lc 'pm2 save'
+
+              cd /home/ec2-user
               git clone -b "${GitBranch}" "${CartServiceRepoUrl}" Cart-Service
 
               chown -R ec2-user:ec2-user /home/ec2-user/Cart-Service
 
               cat > /home/ec2-user/Cart-Service/.env <<'EOF_CART_ENV'
-              PORT=3002
+              PORT=3003
               AWS_REGION=${AWS::Region}
 
               DB_HOST=${DBEndpoint}
@@ -823,6 +868,7 @@ Resources:
               COGNITO_CLIENT_ID=${UserPoolClientId}
 
               PRODUCT_SERVICE_URL=http://127.0.0.1:3001
+              INVENTORY_SERVICE_URL=http://127.0.0.1:3002
 
               INTERNAL_API_KEY=${InternalApiKey}
               EOF_CART_ENV
@@ -846,7 +892,7 @@ Resources:
               chown -R ec2-user:ec2-user /home/ec2-user/Payment-Service
 
               cat > /home/ec2-user/Payment-Service/.env <<'EOF_PAYMENT_ENV'
-              PORT=3003
+              PORT=3005
               AWS_REGION=${AWS::Region}
 
               DB_HOST=${DBEndpoint}
@@ -902,8 +948,9 @@ Resources:
 
               USER_SERVICE_URL=http://127.0.0.1:3000
               PRODUCT_SERVICE_URL=http://127.0.0.1:3001
-              CART_SERVICE_URL=http://127.0.0.1:3002
-              PAYMENT_SERVICE_URL=http://127.0.0.1:3003
+              INVENTORY_SERVICE_URL=http://127.0.0.1:3002
+              CART_SERVICE_URL=http://127.0.0.1:3003
+              PAYMENT_SERVICE_URL=http://127.0.0.1:3005
 
               PAYMENT_REQUESTED_TOPIC_ARN=${PaymentRequestedTopicArn}
               PAYMENT_RESULT_QUEUE_URL=${PaymentResultQueueUrl}
@@ -939,6 +986,7 @@ Resources:
               window.APP_CONFIG = {
                   USER_SERVICE_URL: "",
                   PRODUCT_SERVICE_URL: "",
+                  INVENTORY_SERVICE_URL: "",
                   CART_SERVICE_URL: "",
                   ORDER_SERVICE_URL: "",
                   PAYMENT_SERVICE_URL: ""
@@ -957,8 +1005,10 @@ Resources:
                   root /var/www/hashop;
                   index index.html;
 
-                  client_max_body_size 20M;
-
+                  # =========================
+                  # Redirect URL .html cũ sang URL đẹp
+                  # Dùng 302 trong lúc dev để tránh browser cache redirect vĩnh viễn
+                  # =========================
                   location = /index.html {
                       return 302 /;
                   }
@@ -983,6 +1033,14 @@ Resources:
                       return 302 /admin/users;
                   }
 
+                  location = /admin-products.html {
+                      return 302 /admin/products;
+                  }
+
+                  location = /admin-categories.html {
+                      return 302 /admin/categories;
+                  }
+
                   location = /cart.html {
                       return 302 /cart;
                   }
@@ -1002,9 +1060,16 @@ Resources:
                   location = /admin-orders.html {
                       return 302 /admin/orders;
                   }
-                  
+
+                  # =========================
+                  # Frontend clean routes
+                  # =========================
                   location = / {
                       try_files /index.html =404;
+                  }
+
+                  location ^~ /products/ {
+                    try_files /product-detail.html =404;
                   }
 
                   location = /login {
@@ -1027,10 +1092,6 @@ Resources:
                       try_files /admin-users.html =404;
                   }
 
-                  location ^~ /products/ {
-                      try_files /product-detail.html =404;
-                  }
-
                   location = /admin/products {
                       try_files /admin-products.html =404;
                   }
@@ -1038,11 +1099,11 @@ Resources:
                   location = /admin/categories {
                       try_files /admin-categories.html =404;
                   }
-
+                  
                   location = /cart {
                       try_files /cart.html =404;
                   }
-                  
+
                   location = /confirm-order {
                       try_files /confirm-order.html =404;
                   }
@@ -1067,6 +1128,9 @@ Resources:
                       try_files /admin-orders.html =404;
                   }
 
+                  # =========================
+                  # User Service - port 3000
+                  # =========================
                   location /api/users {
                       proxy_pass http://127.0.0.1:3000;
                       proxy_http_version 1.1;
@@ -1074,10 +1138,11 @@ Resources:
                       proxy_set_header Host $host;
                       proxy_set_header X-Real-IP $remote_addr;
                       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                      proxy_set_header X-Forwarded-Proto $scheme;
-                      proxy_set_header Authorization $http_authorization;
                   }
 
+                  # =========================
+                  # Product Service - port 3001
+                  # =========================
                   location /api/products {
                       proxy_pass http://127.0.0.1:3001;
                       proxy_http_version 1.1;
@@ -1085,8 +1150,7 @@ Resources:
                       proxy_set_header Host $host;
                       proxy_set_header X-Real-IP $remote_addr;
                       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                      proxy_set_header X-Forwarded-Proto $scheme;
-                      proxy_set_header Authorization $http_authorization;
+                proxy_set_header Authorization $http_authorization;
                   }
 
                   location /api/categories {
@@ -1096,8 +1160,7 @@ Resources:
                       proxy_set_header Host $host;
                       proxy_set_header X-Real-IP $remote_addr;
                       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                      proxy_set_header X-Forwarded-Proto $scheme;
-                      proxy_set_header Authorization $http_authorization;
+                proxy_set_header Authorization $http_authorization;
                   }
 
                   location /api/sizes {
@@ -1107,7 +1170,6 @@ Resources:
                       proxy_set_header Host $host;
                       proxy_set_header X-Real-IP $remote_addr;
                       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                      proxy_set_header X-Forwarded-Proto $scheme;
                       proxy_set_header Authorization $http_authorization;
                   }
 
@@ -1118,34 +1180,38 @@ Resources:
                       proxy_set_header Host $host;
                       proxy_set_header X-Real-IP $remote_addr;
                       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                      proxy_set_header X-Forwarded-Proto $scheme;
                       proxy_set_header Authorization $http_authorization;
                   }
 
-                  location /api/cart {
+                  # =========================
+                  # Inventory Service - port 3002
+                  # =========================
+                  location /api/inventory {
                       proxy_pass http://127.0.0.1:3002;
                       proxy_http_version 1.1;
 
                       proxy_set_header Host $host;
                       proxy_set_header X-Real-IP $remote_addr;
                       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                      proxy_set_header X-Forwarded-Proto $scheme;
                       proxy_set_header Authorization $http_authorization;
-                      proxy_set_header X-Internal-Api-Key $http_x_internal_api_key;
                   }
 
-                  location /api/payments {
+                  # =========================
+                  # Cart Service - port 3003
+                  # =========================
+                  location /api/cart {
                       proxy_pass http://127.0.0.1:3003;
                       proxy_http_version 1.1;
 
                       proxy_set_header Host $host;
                       proxy_set_header X-Real-IP $remote_addr;
                       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-                      proxy_set_header X-Forwarded-Proto $scheme;
-                      proxy_set_header Authorization $http_authorization;
-                      proxy_set_header X-Internal-Api-Key $http_x_internal_api_key;
+                proxy_set_header Authorization $http_authorization;
                   }
 
+                  # =========================
+                  # Order Service - port 3004
+                  # =========================
                   location /api/orders {
                       proxy_pass http://127.0.0.1:3004;
                       proxy_http_version 1.1;
@@ -1154,14 +1220,29 @@ Resources:
                       proxy_set_header X-Real-IP $remote_addr;
                       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
                       proxy_set_header X-Forwarded-Proto $scheme;
+
                       proxy_set_header Authorization $http_authorization;
-                      proxy_set_header X-Internal-Api-Key $http_x_internal_api_key;
                   }
 
+                  # =========================
+                  # Payment Service - port 3005
+                  # =========================
+                  location /api/payments {
+                      proxy_pass http://127.0.0.1:3005;
+                      proxy_http_version 1.1;
+
+                      proxy_set_header Host $host;
+                      proxy_set_header X-Real-IP $remote_addr;
+                      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                      proxy_set_header Authorization $http_authorization;
+                  }
+
+                  # API nào không đúng route thì trả 404
                   location /api/ {
                       return 404;
                   }
 
+                  # Static files: config.js, css, js, images...
                   location / {
                       try_files $uri $uri/ /index.html;
                   }
@@ -1171,7 +1252,7 @@ Resources:
               nginx -t
               systemctl reload nginx
 
-              echo "HaShop User + Product + Cart + Payment + Order Service bootstrap completed"
+              echo "HaShop User + Product + Inventory + Cart + Order + Payment Service bootstrap completed"
             - DBEndpoint: !GetAtt UserDB.Endpoint.Address
               UserPoolId: !Ref UserPool
               UserPoolClientId: !Ref UserPoolClient
@@ -1183,6 +1264,7 @@ Resources:
               InternalApiKey: !Ref InternalApiKey
               PaymentDBName: !Ref PaymentDBName
               OrderDBName: !Ref OrderDBName
+              InventoryDBName: !Ref InventoryDBName
               PaymentRequestedTopicArn: !Ref PaymentRequestedTopic
               PaymentResultTopicArn: !Ref PaymentResultTopic
               PaymentRequestedQueueUrl: !Ref PaymentRequestedQueue
