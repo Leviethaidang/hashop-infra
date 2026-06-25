@@ -240,6 +240,8 @@ PAYMENT_SERVICE_URL=http://127.0.0.1:3005
 PAYMENT_REQUESTED_TOPIC_ARN=$PAYMENT_REQUESTED_TOPIC_ARN
 PAYMENT_RESULT_QUEUE_URL=$PAYMENT_RESULT_QUEUE_URL
 
+NOTIFICATION_REQUESTED_TOPIC_ARN=$NOTIFICATION_REQUESTED_TOPIC_ARN
+
 INTERNAL_API_KEY=$INTERNAL_API_KEY
 EOF_ORDER_ENV
 
@@ -257,6 +259,32 @@ sudo -u ec2-user bash -lc 'cd /home/ec2-user/Order-Service && pm2 start server.j
 
 sudo -u ec2-user bash -lc 'cd /home/ec2-user/Order-Service && pm2 delete order-worker || true'
 sudo -u ec2-user bash -lc 'cd /home/ec2-user/Order-Service && pm2 start worker.js --name order-worker'
+
+sudo -u ec2-user bash -lc 'pm2 save'
+
+
+cd /home/ec2-user
+
+git clone -b "$GIT_BRANCH" "$NOTIFICATION_SERVICE_REPO_URL" Notification-Service
+
+chown -R ec2-user:ec2-user /home/ec2-user/Notification-Service
+
+cat > /home/ec2-user/Notification-Service/.env <<EOF_NOTIFICATION_ENV
+AWS_REGION=$AWS_REGION
+
+NOTIFICATION_REQUESTED_QUEUE_URL=$NOTIFICATION_REQUESTED_QUEUE_URL
+
+ADMIN_EMAIL=$ADMIN_EMAIL
+SES_FROM_EMAIL=$SES_FROM_EMAIL
+EOF_NOTIFICATION_ENV
+
+chown ec2-user:ec2-user /home/ec2-user/Notification-Service/.env
+chmod 600 /home/ec2-user/Notification-Service/.env
+
+sudo -u ec2-user bash -lc 'cd /home/ec2-user/Notification-Service && npm ci || npm install'
+
+sudo -u ec2-user bash -lc 'cd /home/ec2-user/Notification-Service && pm2 delete notification-worker || true'
+sudo -u ec2-user bash -lc 'cd /home/ec2-user/Notification-Service && pm2 start worker.js --name notification-worker'
 
 sudo -u ec2-user bash -lc 'pm2 save'
 
@@ -515,4 +543,4 @@ EOF_NGINX
 nginx -t
 systemctl reload nginx
 
-echo "HaShop User + Product + Inventory + Cart + Order + Payment Service bootstrap completed"
+echo "HaShop Full Service bootstrap completed"

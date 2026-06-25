@@ -154,6 +154,18 @@ Parameters:
     Type: String
     Default: https://github.com/Leviethaidang/Inventory-Service.git
 
+  NotificationServiceRepoUrl:
+    Type: String
+    Default: https://github.com/Leviethaidang/Notification-Service.git
+
+  SESFromEmail:
+    Type: String
+    Description: Verified SES sender email, for example Leviethaidang061104@gmail.com
+
+  AdminEmail:
+    Type: String
+    Description: Admin email to receive new order notifications
+
 Resources:
   HashopVPC:
     Type: AWS::EC2::VPC
@@ -621,6 +633,49 @@ Resources:
       Endpoint: !GetAtt PaymentResultQueue.Arn
       RawMessageDelivery: true
 
+  NotificationRequestedTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub ${ProjectName}-${EnvironmentName}-notification-requested-topic
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-notification-requested-topic
+
+  NotificationRequestedQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub ${ProjectName}-${EnvironmentName}-notification-requested-queue
+      VisibilityTimeout: 60
+      Tags:
+        - Key: Name
+          Value: !Sub ${ProjectName}-${EnvironmentName}-notification-requested-queue
+
+  NotificationRequestedQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues:
+        - !Ref NotificationRequestedQueue
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowNotificationRequestedTopicToSendMessage
+            Effect: Allow
+            Principal:
+              Service: sns.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt NotificationRequestedQueue.Arn
+            Condition:
+              ArnEquals:
+                aws:SourceArn: !Ref NotificationRequestedTopic
+
+  NotificationRequestedSubscription:
+    Type: AWS::SNS::Subscription
+    DependsOn: NotificationRequestedQueuePolicy
+    Properties:
+      TopicArn: !Ref NotificationRequestedTopic
+      Protocol: sqs
+      Endpoint: !GetAtt NotificationRequestedQueue.Arn
+
   EC2InstanceRole:
     Type: AWS::IAM::Role
     Properties:
@@ -680,6 +735,7 @@ Resources:
                 Resource:
                   - !Ref PaymentRequestedTopic
                   - !Ref PaymentResultTopic
+                  - !Ref NotificationRequestedTopic
 
               - Effect: Allow
                 Action:
@@ -691,6 +747,13 @@ Resources:
                 Resource:
                   - !GetAtt PaymentRequestedQueue.Arn
                   - !GetAtt PaymentResultQueue.Arn
+                  - !GetAtt NotificationRequestedQueue.Arn
+              
+              - Effect: Allow
+                Action:
+                  - ses:SendEmail
+                  - ses:SendRawEmail
+                Resource: "*"
 
   EC2InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -714,6 +777,10 @@ Resources:
       - PaymentResultQueue
       - PaymentRequestedSubscription
       - PaymentResultSubscription
+      - NotificationRequestedTopic
+      - NotificationRequestedQueue
+      - NotificationRequestedSubscription
+
     Properties:
       ImageId: !Ref LatestAmiId
       InstanceType: !Ref InstanceType
@@ -773,6 +840,13 @@ Resources:
               export PAYMENT_RESULT_TOPIC_ARN='${PaymentResultTopicArn}'
               export PAYMENT_REQUESTED_QUEUE_URL='${PaymentRequestedQueueUrl}'
               export PAYMENT_RESULT_QUEUE_URL='${PaymentResultQueueUrl}'
+
+              export NOTIFICATION_SERVICE_REPO_URL='${NotificationServiceRepoUrl}'
+              export NOTIFICATION_REQUESTED_TOPIC_ARN='${NotificationRequestedTopicArn}'
+              export NOTIFICATION_REQUESTED_QUEUE_URL='${NotificationRequestedQueueUrl}'
+              export SES_FROM_EMAIL='${SESFromEmail}'
+              export ADMIN_EMAIL='${AdminEmail}'
+
               EOF_HASHOP_ENV
 
               chmod 600 /opt/hashop/bootstrap.env
@@ -819,6 +893,12 @@ Resources:
 
               BootstrapScriptS3Bucket: !Ref BootstrapScriptS3Bucket
               BootstrapScriptS3Key: !Ref BootstrapScriptS3Key
+
+              NotificationServiceRepoUrl: !Ref NotificationServiceRepoUrl
+              NotificationRequestedTopicArn: !Ref NotificationRequestedTopic
+              NotificationRequestedQueueUrl: !Ref NotificationRequestedQueue
+              SESFromEmail: !Ref SESFromEmail
+              AdminEmail: !Ref AdminEmail
               
 Outputs:
   WebsiteUrl:
@@ -868,3 +948,15 @@ Outputs:
   PaymentResultQueueUrl:
     Description: SQS queue URL for payment results
     Value: !Ref PaymentResultQueue
+  
+  NotificationRequestedTopicArn:
+    Description: SNS topic ARN for notification requests
+    Value: !Ref NotificationRequestedTopic
+
+  NotificationRequestedQueueUrl:
+    Description: SQS queue URL for notification requests
+    Value: !Ref NotificationRequestedQueue
+
+  NotificationRequestedQueueArn:
+    Description: SQS queue ARN for notification requests
+    Value: !GetAtt NotificationRequestedQueue.Arn
